@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 Бот магазина Honest Store.
-Приветствие + кнопки (Каталог, Доставка, Оплата, Размеры, Возврат, Поддержка)
-+ УВЕДОМЛЕНИЯ О ЗАКАЗАХ: при новом заказе владельцу приходит сообщение
-  с кнопками «Оплачен» и «Убрать товар с витрины».
+Кнопки разделов + УВЕДОМЛЕНИЯ О ЗАКАЗАХ.
+При новом заказе владельцу приходит сообщение с кнопками:
+  ✅ Подтвердить        — убирает товар(ы) с витрины и ставит заказу статус "подтверждён"
+  ❌ Аннулировать заказ — удаляет заявку (у клиента заказ пропадает)
 """
 
 import os
@@ -101,7 +102,7 @@ def h_delivery(m):
     bot.send_message(m.chat.id, TXT_DELIVERY)
 
 
-@bot.message_handler(func=lambda m: m.text == "💳 Оплata".replace("a", "а"))
+@bot.message_handler(func=lambda m: m.text == "💳 Оплата")
 def h_payment(m):
     bot.send_message(m.chat.id, TXT_PAYMENT)
 
@@ -142,14 +143,28 @@ def fetch_new_orders():
     return r.json()
 
 
+def fetch_order(oid):
+    r = requests.get(REST + "/orders", headers=_h(),
+                     params={"select": "*", "id": "eq." + str(oid)}, timeout=20)
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if rows else None
+
+
 def mark_notified(oid):
     requests.patch(REST + "/orders", headers=_h({"Content-Type": "application/json", "Prefer": "return=minimal"}),
                    params={"id": "eq." + str(oid)}, json={"notified": True}, timeout=20)
 
 
-def mark_paid(oid):
+def set_status(oid, status):
     requests.patch(REST + "/orders", headers=_h({"Content-Type": "application/json", "Prefer": "return=minimal"}),
-                   params={"id": "eq." + str(oid)}, json={"status": "paid"}, timeout=20)
+                   params={"id": "eq." + str(oid)}, json={"status": status}, timeout=20)
+
+
+def delete_order(oid):
+    r = requests.delete(REST + "/orders", headers=_h({"Prefer": "return=minimal"}),
+                        params={"id": "eq." + str(oid)}, timeout=20)
+    r.raise_for_status()
 
 
 def delete_product(pid):
@@ -174,11 +189,8 @@ def format_order(o):
 
 def order_keyboard(o):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✅ Оплачен", callback_data="paid:%s" % o["id"]))
-    for it in (o.get("items") or []):
-        if it.get("id") is not None:
-            kb.add(types.InlineKeyboardButton("🗑 Убрать с витрины: %s" % (it.get("name") or "товар")[:28],
-                                              callback_data="del:%s" % it["id"]))
+    kb.add(types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm:%s" % o["id"]))
+    kb.add(types.InlineKeyboardButton("❌ Аннулировать заказ", callback_data="cancel:%s" % o["id"]))
     return kb
 
 
@@ -189,19 +201,27 @@ def on_callback(c):
         return
     try:
         action, _, val = c.data.partition(":")
-        if action == "paid":
-            mark_paid(val)
-            bot.answer_callback_query(c.id, "Отмечено как оплачено ✅")
+        if action == "confirm":
+            o = fetch_order(val)
+            if o:
+                for it in (o.get("items") or []):
+                    if it.get("id") is not None:
+                        try:
+                            delete_product(it["id"])
+                        except Exception:
+                            pass
+                set_status(val, "confirmed")
+            bot.answer_callback_query(c.id, "Заказ подтверждён ✅")
             try:
-                bot.edit_message_text(c.message.html_text + "\n\n✅ <b>ОПЛАЧЕН</b>",
+                bot.edit_message_text(c.message.html_text + "\n\n✅ <b>ПОДТВЕРЖДЁН</b> · товар убран с витрины",
                                       c.message.chat.id, c.message.message_id, reply_markup=None)
             except Exception:
                 pass
-        elif action == "del":
-            delete_product(val)
-            bot.answer_callback_query(c.id, "Товар убран с витрины 🗑")
+        elif action == "cancel":
+            delete_order(val)
+            bot.answer_callback_query(c.id, "Заказ аннулирован ❌")
             try:
-                bot.edit_message_text(c.message.html_text + "\n\n🗑 <b>Товар убран с витрины</b>",
+                bot.edit_message_text(c.message.html_text + "\n\n❌ <b>АННУЛИРОВАН</b>",
                                       c.message.chat.id, c.message.message_id, reply_markup=None)
             except Exception:
                 pass
@@ -214,31 +234,3 @@ def on_callback(c):
 def order_poll_loop():
     if not (REST and SUPABASE_KEY):
         print("Supabase не настроен — уведомления ВЫКЛ.")
-        return
-    print("Уведомления о заказах: ВКЛ. Проверка каждые %s сек." % POLL_SECONDS)
-    while True:
-        try:
-            for o in fetch_new_orders():
-                try:
-                    bot.send_message(OWNER_ID, format_order(o), reply_markup=order_keyboard(o))
-                    mark_notified(o["id"])
-                except Exception as e:
-                    print("Не смог отправить заказ %s: %s" % (o.get("id"), e))
-        except Exception as e:
-            print("Ошибка опроса заказов: %s" % e)
-        time.sleep(POLL_SECONDS)
-
-
-if __name__ == "__main__":
-    print("Bot started.")
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
-    threading.Thread(target=order_poll_loop, daemon=True).start()
-    while True:
-        try:
-            bot.infinity_polling(skip_pending=True, timeout=30)
-        except Exception as e:
-            print("Polling упал, перезапуск через 5 сек: %s" % e)
-            time.sleep(5)
