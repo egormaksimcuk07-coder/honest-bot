@@ -234,3 +234,31 @@ def on_callback(c):
 def order_poll_loop():
     if not (REST and SUPABASE_KEY):
         print("Supabase не настроен — уведомления ВЫКЛ.")
+        return
+    print("Уведомления о заказах: ВКЛ. Проверка каждые %s сек." % POLL_SECONDS)
+    while True:
+        try:
+            for o in fetch_new_orders():
+                try:
+                    bot.send_message(OWNER_ID, format_order(o), reply_markup=order_keyboard(o))
+                    mark_notified(o["id"])
+                except Exception as e:
+                    print("Не смог отправить заказ %s: %s" % (o.get("id"), e))
+        except Exception as e:
+            print("Ошибка опроса заказов: %s" % e)
+        time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    print("Bot started.")
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+    threading.Thread(target=order_poll_loop, daemon=True).start()
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=30)
+        except Exception as e:
+            print("Polling упал, перезапуск через 5 сек: %s" % e)
+            time.sleep(5)
