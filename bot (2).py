@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 Бот магазина Honest Store.
-Приветствие + кнопки (Каталог, Доставка, Оплата, Размеры, Возврат, Поддержка)
-+ УВЕДОМЛЕНИЯ О ЗАКАЗАХ: при новом заказе владельцу приходит сообщение
-  с кнопками «✅ Оплачен» и «🗑 Убрать товар с витрины».
-
-Запуск 24/7 на Railway. Переменные окружения (Railway -> Variables):
-  BOT_TOKEN     — токен бота от @BotFather
-  SUPABASE_URL  — https://wzeqohefoemixstghlfz.supabase.co
-  SUPABASE_KEY  — секретный ключ Supabase (service_role / sb_secret_...)
+Кнопки разделов + УВЕДОМЛЕНИЯ О ЗАКАЗАХ.
+При новом заказе владельцу приходит сообщение с кнопками:
+  ✅ Подтвердить        — убирает товар(ы) с витрины и ставит заказу статус "подтверждён"
+  ❌ Аннулировать заказ — удаляет заявку (у клиента заказ пропадает)
 """
 
 import os
@@ -18,24 +14,21 @@ import requests
 import telebot
 from telebot import types
 
-# --- НАСТРОЙКИ ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")                 # Railway -> Variables
-WEBAPP_URL = "https://radiant-dango-bde1af.netlify.app"     # ссылка на приложение
-SUPPORT = "Honest_KaS"                                      # username поддержки (без @)
-OWNER_ID = 1925395566                                       # твой Telegram ID — сюда летят заказы
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+WEBAPP_URL = "https://honeststore.netlify.app"
+SUPPORT = "Honest_KaS"
+OWNER_ID = 1925395566
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 REST = (SUPABASE_URL + "/rest/v1") if SUPABASE_URL else ""
-
-POLL_SECONDS = 15  # как часто проверять новые заказы
+POLL_SECONDS = 15
 
 if not BOT_TOKEN:
-    raise SystemExit("Не задан BOT_TOKEN. Добавь переменную окружения BOT_TOKEN с токеном бота.")
+    raise SystemExit("Не задан BOT_TOKEN.")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# --- ТЕКСТЫ РАЗДЕЛОВ ---
 TXT_DELIVERY = (
     "📦 <b>Доставка</b>\n\n"
     "Отправляем по России и СНГ в день оплаты.\n"
@@ -96,17 +89,11 @@ def cmd_start(m):
 
 @bot.message_handler(commands=["help"])
 def cmd_help(m):
-    bot.send_message(
-        m.chat.id,
-        "❓ <b>Помощь</b>\n\nКнопки внизу: каталог, доставка, оплата, размеры, возврат.\n"
-        "Связь с нами: @" + SUPPORT,
-        reply_markup=main_keyboard(),
-    )
+    bot.send_message(m.chat.id, "❓ Кнопки внизу. Связь: @" + SUPPORT, reply_markup=main_keyboard())
 
 
 @bot.message_handler(commands=["id"])
 def cmd_id(m):
-    # Удобно проверить свой Telegram ID (должен совпадать с OWNER_ID)
     bot.send_message(m.chat.id, "Ваш Telegram ID: <code>%s</code>" % m.chat.id)
 
 
@@ -132,7 +119,7 @@ def h_return(m):
 
 @bot.message_handler(func=lambda m: m.text == "✍️ Поддержка")
 def h_support(m):
-    bot.send_message(m.chat.id, "Напишите нам — ответим и поможем оформить заказ:", reply_markup=support_inline())
+    bot.send_message(m.chat.id, "Напишите нам:", reply_markup=support_inline())
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -140,9 +127,9 @@ def fallback(m):
     bot.send_message(m.chat.id, "Пользуйтесь кнопками ниже 👇", reply_markup=main_keyboard())
 
 
-# ====================== УВЕДОМЛЕНИЯ О ЗАКАЗАХ ======================
+# ===== УВЕДОМЛЕНИЯ О ЗАКАЗАХ =====
 
-def _supa_headers(extra=None):
+def _h(extra=None):
     h = {"apikey": SUPABASE_KEY, "Authorization": "Bearer " + SUPABASE_KEY}
     if extra:
         h.update(extra)
@@ -150,43 +137,39 @@ def _supa_headers(extra=None):
 
 
 def fetch_new_orders():
-    r = requests.get(
-        REST + "/orders",
-        headers=_supa_headers(),
-        params={"select": "*", "notified": "eq.false", "order": "id.asc"},
-        timeout=20,
-    )
+    r = requests.get(REST + "/orders", headers=_h(),
+                     params={"select": "*", "notified": "eq.false", "order": "id.asc"}, timeout=20)
     r.raise_for_status()
     return r.json()
 
 
-def mark_notified(order_id):
-    requests.patch(
-        REST + "/orders",
-        headers=_supa_headers({"Content-Type": "application/json", "Prefer": "return=minimal"}),
-        params={"id": "eq." + str(order_id)},
-        json={"notified": True},
-        timeout=20,
-    )
+def fetch_order(oid):
+    r = requests.get(REST + "/orders", headers=_h(),
+                     params={"select": "*", "id": "eq." + str(oid)}, timeout=20)
+    r.raise_for_status()
+    rows = r.json()
+    return rows[0] if rows else None
 
 
-def mark_paid(order_id):
-    requests.patch(
-        REST + "/orders",
-        headers=_supa_headers({"Content-Type": "application/json", "Prefer": "return=minimal"}),
-        params={"id": "eq." + str(order_id)},
-        json={"status": "paid"},
-        timeout=20,
-    )
+def mark_notified(oid):
+    requests.patch(REST + "/orders", headers=_h({"Content-Type": "application/json", "Prefer": "return=minimal"}),
+                   params={"id": "eq." + str(oid)}, json={"notified": True}, timeout=20)
 
 
-def delete_product(product_id):
-    r = requests.delete(
-        REST + "/products",
-        headers=_supa_headers({"Prefer": "return=minimal"}),
-        params={"id": "eq." + str(product_id)},
-        timeout=20,
-    )
+def set_status(oid, status):
+    requests.patch(REST + "/orders", headers=_h({"Content-Type": "application/json", "Prefer": "return=minimal"}),
+                   params={"id": "eq." + str(oid)}, json={"status": status}, timeout=20)
+
+
+def delete_order(oid):
+    r = requests.delete(REST + "/orders", headers=_h({"Prefer": "return=minimal"}),
+                        params={"id": "eq." + str(oid)}, timeout=20)
+    r.raise_for_status()
+
+
+def delete_product(pid):
+    r = requests.delete(REST + "/products", headers=_h({"Prefer": "return=minimal"}),
+                        params={"id": "eq." + str(pid)}, timeout=20)
     r.raise_for_status()
 
 
@@ -195,12 +178,10 @@ def format_order(o):
     for it in (o.get("items") or []):
         size = (" (%s)" % it["size"]) if it.get("size") else ""
         lines.append("• %s%s — %s ₽" % (it.get("name", "?"), size, it.get("price", "?")))
-    lines.append("")
-    lines.append("💰 Итого: <b>%s ₽</b>" % o.get("total", "?"))
-    lines.append("")
-    lines.append("👤 %s" % (o.get("customer_name") or "—"))
-    lines.append("📞 <code>%s</code>" % (o.get("contact") or "—"))
-    lines.append("📍 %s" % (o.get("address") or "—"))
+    lines += ["", "💰 Итого: <b>%s ₽</b>" % o.get("total", "?"), "",
+              "👤 %s" % (o.get("customer_name") or "—"),
+              "📞 <code>%s</code>" % (o.get("contact") or "—"),
+              "📍 %s" % (o.get("address") or "—")]
     if o.get("comment"):
         lines.append("💬 %s" % o["comment"])
     return "\n".join(lines)
@@ -208,40 +189,40 @@ def format_order(o):
 
 def order_keyboard(o):
     kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("✅ Оплачен", callback_data="paid:%s" % o["id"]))
-    for it in (o.get("items") or []):
-        if it.get("id") is not None:
-            name = (it.get("name") or "товар")[:28]
-            kb.add(types.InlineKeyboardButton("🗑 Убрать с витрины: %s" % name, callback_data="del:%s" % it["id"]))
+    kb.add(types.InlineKeyboardButton("✅ Подтвердить", callback_data="confirm:%s" % o["id"]))
+    kb.add(types.InlineKeyboardButton("❌ Аннулировать заказ", callback_data="cancel:%s" % o["id"]))
     return kb
 
 
 @bot.callback_query_handler(func=lambda c: True)
 def on_callback(c):
-    # Только владелец может отмечать оплату и убирать товары
     if c.from_user.id != OWNER_ID:
         bot.answer_callback_query(c.id, "Недоступно")
         return
     try:
         action, _, val = c.data.partition(":")
-        if action == "paid":
-            mark_paid(val)
-            bot.answer_callback_query(c.id, "Отмечено как оплачено ✅")
+        if action == "confirm":
+            o = fetch_order(val)
+            if o:
+                for it in (o.get("items") or []):
+                    if it.get("id") is not None:
+                        try:
+                            delete_product(it["id"])
+                        except Exception:
+                            pass
+                set_status(val, "confirmed")
+            bot.answer_callback_query(c.id, "Заказ подтверждён ✅")
             try:
-                bot.edit_message_text(
-                    c.message.html_text + "\n\n✅ <b>ОПЛАЧЕН</b>",
-                    c.message.chat.id, c.message.message_id, reply_markup=None,
-                )
+                bot.edit_message_text(c.message.html_text + "\n\n✅ <b>ПОДТВЕРЖДЁН</b> · товар убран с витрины",
+                                      c.message.chat.id, c.message.message_id, reply_markup=None)
             except Exception:
                 pass
-        elif action == "del":
-            delete_product(val)
-            bot.answer_callback_query(c.id, "Товар убран с витрины 🗑")
+        elif action == "cancel":
+            delete_order(val)
+            bot.answer_callback_query(c.id, "Заказ аннулирован ❌")
             try:
-                bot.edit_message_text(
-                    c.message.html_text + "\n\n🗑 <b>Товар убран с витрины</b>",
-                    c.message.chat.id, c.message.message_id, reply_markup=None,
-                )
+                bot.edit_message_text(c.message.html_text + "\n\n❌ <b>АННУЛИРОВАН</b>",
+                                      c.message.chat.id, c.message.message_id, reply_markup=None)
             except Exception:
                 pass
         else:
@@ -252,7 +233,7 @@ def on_callback(c):
 
 def order_poll_loop():
     if not (REST and SUPABASE_KEY):
-        print("Supabase не настроен (SUPABASE_URL/SUPABASE_KEY) — уведомления о заказах ВЫКЛ.")
+        print("Supabase не настроен — уведомления ВЫКЛ.")
         return
     print("Уведомления о заказах: ВКЛ. Проверка каждые %s сек." % POLL_SECONDS)
     while True:
