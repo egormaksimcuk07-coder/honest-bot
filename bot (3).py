@@ -15,7 +15,7 @@ import telebot
 from telebot import types
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-WEBAPP_URL = "https://honeststore.netlify.app/?v=2"
+WEBAPP_URL = "https://honeststore.netlify.app/?v=3"
 SUPPORT = "Honest_KaS"
 OWNER_ID = 1925395566
 
